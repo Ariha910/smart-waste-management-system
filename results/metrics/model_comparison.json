@@ -1,0 +1,20 @@
+[
+    {
+        "Model":"Custom CNN",
+        "Accuracy":0.5868421053,
+        "Macro Precision":0.5593074775,
+        "Macro Recall":0.5314520571,
+        "Macro F1-Score":0.5248978516,
+        "Weighted F1-Score":0.570251342,
+        "Total Parameters":"536,998"
+    },
+    {
+        "Model":"MobileNetV2 (Transfer Learning)",
+        "Accuracy":0.8026315789,
+        "Macro Precision":0.8299165805,
+        "Macro Recall":0.7460316062,
+        "Macro F1-Score":0.7678396035,
+        "Weighted F1-Score":0.801412797,
+        "Total Parameters":"2,625,734"
+    }
+]

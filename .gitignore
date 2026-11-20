@@ -1,0 +1,58 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.venv/
+env.bak/
+venv.bak/
+
+# macOS system files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# Temporary and cache files
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+.cache/
+
+# Large raw dataset archives and raw split directories
+# (Full TrashNet dataset ~85MB is excluded; preprocess.py downloads it automatically)
+data/trashnet/
+data/split/
+data/dataset-resized.zip
+data/dataset-resized/
+
+# Preserve sample test images for quick verification and Streamlit demo
+!data/sample_test_images/
+!data/sample_test_images/*
+
+# IDE & Editor settings
+.vscode/
+.idea/
+
+# Environment files & Secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Logs and runtime traces
+*.log
+.system_generated/
