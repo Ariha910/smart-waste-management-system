@@ -250,17 +250,21 @@ with st.sidebar:
     )
     st.divider()
 
+    nav_options = [
+        "Image Classification",
+        "Real-World Testing",
+        "Grad-CAM Explainability",
+        "Model Performance",
+        "Home",
+        "About Project",
+    ]
+    query_p = st.query_params.get("page", "Image Classification")
+    init_index = nav_options.index(query_p) if query_p in nav_options else 0
+
     selected_page = st.radio(
         "Navigation Menu",
-        [
-            "Home",
-            "Image Classification",
-            "Model Performance",
-            "Real-World Testing",
-            "Grad-CAM Explainability",
-            "About Project",
-        ],
-        index=0,
+        nav_options,
+        index=init_index,
     )
 
     st.divider()
@@ -453,26 +457,28 @@ elif selected_page == "Image Classification":
             image_source_label = f"Uploaded File: {uploaded_file.name}"
 
     with tab_samples:
-        st.markdown("Select a representative sample test image:")
+        st.markdown("Click any sample category below to test immediately:")
         sample_dir = config.DATA_DIR / "sample_test_images"
-        sample_options = {}
+        
+        btn_cols = st.columns(6)
+        cat_icons = {
+            "cardboard": "📦", "glass": "🍾", "metal": "🥫",
+            "paper": "📄", "plastic": "🧴", "trash": "🗑️"
+        }
+        
+        for i, c in enumerate(config.CLASSES):
+            with btn_cols[i]:
+                if st.button(f"{cat_icons.get(c, '♻️')} {c.capitalize()}", use_container_width=True):
+                    sample_file = sample_dir / f"sample_{c}.jpg"
+                    if sample_file.exists():
+                        st.session_state["active_sample"] = str(sample_file)
+                        st.session_state["active_sample_label"] = f"Reference {c.capitalize()} Sample"
 
-        if sample_dir.exists():
-            for img_path in sorted(sample_dir.glob("*.jpg")):
-                clean_name = img_path.stem.replace("sample_", "").capitalize()
-                sample_options[f"Sample {clean_name} ({img_path.name})"] = img_path
-
-        if sample_options:
-            selected_sample_key = st.selectbox(
-                "Choose a sample test image:",
-                options=list(sample_options.keys()),
-                index=0,
-            )
-            if st.button("Load Selected Sample"):
-                image_to_classify = sample_options[selected_sample_key]
-                image_source_label = selected_sample_key
-        else:
-            st.info("Sample test directory not found. Please verify project structure.")
+        if "active_sample" in st.session_state and st.session_state["active_sample"]:
+            sample_p = Path(st.session_state["active_sample"])
+            if sample_p.exists() and uploaded_file is None:
+                image_to_classify = sample_p
+                image_source_label = st.session_state.get("active_sample_label", sample_p.name)
 
     st.divider()
 
