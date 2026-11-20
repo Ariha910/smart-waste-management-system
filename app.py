@@ -1,18 +1,21 @@
 """
 Smart Waste Classification System - Streamlit Web Application
-An interactive academic dashboard for deep learning-based waste categorization.
+An interactive academic dashboard for deep learning-based waste categorization,
+model benchmarking, real-world multi-image testing, and Grad-CAM explainability.
 """
 
 import os
 import sys
 from pathlib import Path
 import json
+import time
 
 # Ensure project root is in sys.path
 BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.append(str(BASE_DIR))
 
+import cv2
 import config
 import numpy as np
 import pandas as pd
@@ -21,7 +24,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from utils.prediction import predict_waste, load_model_cached
+from utils.prediction import (
+    predict_waste,
+    predict_both_models,
+    load_model_cached,
+    preprocess_image_for_inference,
+)
+from utils.gradcam import compute_gradcam, overlay_gradcam
 from training.preprocess import explore_dataset
 
 
@@ -198,6 +207,16 @@ CUSTOM_CSS = """
         color: var(--text-muted);
     }
 
+    /* Real World Card */
+    .rw-card {
+        background: #ffffff;
+        border-radius: 14px;
+        padding: 1.2rem;
+        border: 1px solid #e5e7eb;
+        box-shadow: var(--shadow-sm);
+        margin-bottom: 1rem;
+    }
+
     /* Sidebar Clean Styling */
     [data-testid="stSidebar"] {
         background-color: #ffffff;
@@ -206,6 +225,13 @@ CUSTOM_CSS = """
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+
+# ==========================================
+# SESSION STATE INITIALIZATION
+# ==========================================
+if "real_world_history" not in st.session_state:
+    st.session_state["real_world_history"] = []
 
 
 # ==========================================
@@ -227,10 +253,12 @@ with st.sidebar:
     selected_page = st.radio(
         "Navigation Menu",
         [
-            "🏠 Home Overview",
-            "🔍 Image Classification",
-            "📊 Model Performance",
-            "ℹ️ About the Project",
+            "Home",
+            "Image Classification",
+            "Model Performance",
+            "Real-World Testing",
+            "Grad-CAM Explainability",
+            "About Project",
         ],
         index=0,
     )
@@ -239,11 +267,11 @@ with st.sidebar:
 
     st.markdown("### ⚙️ Inference Engine")
     active_model_key = st.selectbox(
-        "Default Model Architecture",
+        "Active Classifier",
         options=["mobilenet", "cnn"],
         format_func=lambda x: "MobileNetV2 (Transfer Learning)" if x == "mobilenet" else "Custom Deep CNN",
         index=0,
-        help="Choose which trained neural network performs image inference.",
+        help="Choose which trained neural network performs single-image classification.",
     )
 
     st.markdown(
@@ -259,9 +287,9 @@ with st.sidebar:
 
 
 # ==========================================
-# PAGE 1: HOME OVERVIEW
+# PAGE 1: HOME
 # ==========================================
-if selected_page == "🏠 Home Overview":
+if selected_page == "Home":
     st.markdown(
         """
         <div class="hero-banner">
@@ -301,8 +329,8 @@ if selected_page == "🏠 Home Overview":
         st.markdown(
             """
             <div class="stat-card">
-                <div class="stat-num">2</div>
-                <div class="stat-label">DL Architectures (CNN & MobileNet)</div>
+                <div class="stat-num">80.26%</div>
+                <div class="stat-label">MobileNetV2 Test Accuracy</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -312,7 +340,7 @@ if selected_page == "🏠 Home Overview":
             """
             <div class="stat-card">
                 <div class="stat-num">70:15:15</div>
-                <div class="stat-label">Train-Val-Test Stratified Split</div>
+                <div class="stat-label">Stratified Split (Leakage Free)</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -360,9 +388,9 @@ if selected_page == "🏠 Home Overview":
         st.markdown(
             """
             <div class="step-box">
-                <div class="step-icon">♻️</div>
-                <div class="step-title">4. Eco Action Protocol</div>
-                <div class="step-desc">Surfaces disposal protocols, contamination warnings, and carbon offset statistics.</div>
+                <div class="step-icon">🔬</div>
+                <div class="step-title">4. Grad-CAM & Action</div>
+                <div class="step-desc">Explains model attention via gradient heatmaps and outputs environmental recycling directives.</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -371,7 +399,6 @@ if selected_page == "🏠 Home Overview":
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("### 📦 Recognized Waste Categories & Disposal Directives")
 
-    # Render 6 category cards in 2 rows of 3 columns
     cols_row1 = st.columns(3)
     cols_row2 = st.columns(3)
     cards = list(config.CATEGORY_INFO.items())
@@ -403,14 +430,13 @@ if selected_page == "🏠 Home Overview":
 # ==========================================
 # PAGE 2: IMAGE CLASSIFICATION
 # ==========================================
-elif selected_page == "🔍 Image Classification":
-    st.markdown("## 🔍 Live Waste Classification")
+elif selected_page == "Image Classification":
+    st.markdown("## 🔍 Single-Image Waste Classification")
     st.markdown(
         "Upload a photograph of a waste item or select a curated sample from our independent test dataset. "
         "The model analyzes optical patterns to determine material category, prediction confidence, and disposal guidance."
     )
 
-    # Input method selection
     tab_upload, tab_samples = st.tabs(["📤 Upload Image", "🖼️ Curated Test Samples"])
 
     image_to_classify = None
@@ -427,18 +453,14 @@ elif selected_page == "🔍 Image Classification":
             image_source_label = f"Uploaded File: {uploaded_file.name}"
 
     with tab_samples:
-        st.markdown("Select a sample image from the test set:")
-        # Look for sample test images in data/split/test
+        st.markdown("Select a representative sample test image:")
+        sample_dir = config.DATA_DIR / "sample_test_images"
         sample_options = {}
-        test_dir = config.TEST_DIR
 
-        if test_dir.exists():
-            for c in config.CLASSES:
-                c_dir = test_dir / c
-                if c_dir.exists():
-                    images = list(c_dir.glob("*.*"))
-                    if images:
-                        sample_options[f"Sample {c.capitalize()} ({images[0].name})"] = images[0]
+        if sample_dir.exists():
+            for img_path in sorted(sample_dir.glob("*.jpg")):
+                clean_name = img_path.stem.replace("sample_", "").capitalize()
+                sample_options[f"Sample {clean_name} ({img_path.name})"] = img_path
 
         if sample_options:
             selected_sample_key = st.selectbox(
@@ -450,7 +472,7 @@ elif selected_page == "🔍 Image Classification":
                 image_to_classify = sample_options[selected_sample_key]
                 image_source_label = selected_sample_key
         else:
-            st.info("Test split directory not yet populated. Please run training/preprocess.py first.")
+            st.info("Sample test directory not found. Please verify project structure.")
 
     st.divider()
 
@@ -464,7 +486,6 @@ elif selected_page == "🔍 Image Classification":
                 pil_img = Image.open(image_to_classify)
                 st.image(pil_img, use_container_width=True, caption=image_source_label)
 
-                # Metadata card
                 w, h = pil_img.size
                 st.markdown(
                     f"""
@@ -483,13 +504,10 @@ elif selected_page == "🔍 Image Classification":
         with col_pred:
             st.markdown("#### 🎯 Classification Result")
             if pil_img is not None:
-                # Check model availability
                 target_model_path = config.MOBILENET_MODEL_PATH if active_model_key == "mobilenet" else config.CNN_MODEL_PATH
                 if not target_model_path.exists():
                     st.warning(
-                        f"⚠️ The model weights for **{active_model_key.upper()}** are not found at `{target_model_path}`. "
-                        "The model is currently being trained or has not yet completed. "
-                        "Please check training status or wait for training to finish."
+                        f"⚠️ Model weights for **{active_model_key.upper()}** are not found at `{target_model_path}`."
                     )
                 else:
                     with st.spinner("Analyzing image features..."):
@@ -540,26 +558,35 @@ elif selected_page == "🔍 Image Classification":
                                 )
 
                             # Class-wise probability chart
-                            st.markdown("##### 📊 Class-wise Probability Distribution")
-                            prob_df = pd.DataFrame([
-                                {"Category": c.capitalize(), "Probability": p}
-                                for c, p in result["probabilities"].items()
-                            ]).sort_values(by="Probability", ascending=True)
+                            st.markdown("##### 📊 Class-wise Probability Distribution (All 6 Classes)")
+                            
+                            prob_items = []
+                            for c in config.CLASSES:
+                                p_val = result["probabilities"].get(c, 0.0)
+                                is_top = (c == pred_cls)
+                                prob_items.append({
+                                    "Category": c.capitalize(),
+                                    "Probability": p_val,
+                                    "Is_Top": "Top Prediction" if is_top else "Other Classes",
+                                })
+                            prob_df = pd.DataFrame(prob_items).sort_values(by="Probability", ascending=True)
 
+                            # Use explicit colors to highlight top prediction
+                            color_map = {"Top Prediction": info.get("color", "#2e7d32"), "Other Classes": "#90caf9"}
                             fig = px.bar(
                                 prob_df,
                                 x="Probability",
                                 y="Category",
                                 orientation="h",
                                 text=prob_df["Probability"].apply(lambda v: f"{v:.1%}"),
-                                color="Probability",
-                                color_continuous_scale="Greens",
+                                color="Is_Top",
+                                color_discrete_map=color_map,
                                 range_x=[0, 1.05],
                             )
                             fig.update_layout(
                                 height=280,
-                                margin=dict(l=0, r=20, t=20, b=20),
-                                coloraxis_showscale=False,
+                                margin=dict(l=0, r=20, t=10, b=10),
+                                showlegend=False,
                                 xaxis_title=None,
                                 yaxis_title=None,
                                 plot_bgcolor="rgba(0,0,0,0)",
@@ -567,6 +594,12 @@ elif selected_page == "🔍 Image Classification":
                             )
                             fig.update_traces(textposition="outside")
                             st.plotly_chart(fig, use_container_width=True)
+
+                            st.caption(
+                                "ℹ️ **Note on Softmax Probabilities:** The probabilities sum strictly to 100% across the 6 pre-defined classes. "
+                                "High softmax confidence on an arbitrary external image reflects relative alignment within the closed set, "
+                                "not absolute certainty that the object belongs to the waste domain."
+                            )
 
                             # Actionable Guidance Cards
                             st.markdown("##### 💡 Disposal & Environmental Directive")
@@ -585,14 +618,13 @@ elif selected_page == "🔍 Image Classification":
 # ==========================================
 # PAGE 3: MODEL PERFORMANCE & BENCHMARKING
 # ==========================================
-elif selected_page == "📊 Model Performance":
+elif selected_page == "Model Performance":
     st.markdown("## 📊 Comprehensive Model Benchmarking")
     st.markdown(
         "Performance evaluation of the Custom CNN vs MobileNetV2 (Transfer Learning) on the independent test split (380 unseen images). "
-        "All metrics and curves are generated directly from true model predictions."
+        "All metrics, parameter counts, and inference latencies are measured from actual model executions."
     )
 
-    # Check for comparison metrics file
     comp_file = config.COMPARISON_TABLE_PATH
     if comp_file.exists():
         with open(comp_file, "r") as f:
@@ -618,8 +650,8 @@ elif selected_page == "📊 Model Performance":
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # Performance Comparison Table
-        st.markdown("### 📋 Comparative Evaluation Matrix")
+        # Performance Comparison Table with all 10 extended metrics
+        st.markdown("### 📋 Measured Performance Comparison Table")
         display_df = comp_df.copy()
         for col in ["Accuracy", "Macro Precision", "Macro Recall", "Macro F1-Score", "Weighted F1-Score"]:
             if col in display_df.columns:
@@ -632,7 +664,7 @@ elif selected_page == "📊 Model Performance":
             st.image(str(comp_chart_path), caption="Side-by-Side Model Evaluation Metrics", use_container_width=True)
 
     else:
-        st.warning("Model comparison data not found yet. The models may still be training or evaluation has not been executed.")
+        st.warning("Model comparison data not found. Please run training/evaluate.py to compute benchmark metrics.")
 
     st.divider()
 
@@ -700,15 +732,339 @@ elif selected_page == "📊 Model Performance":
 
 
 # ==========================================
-# PAGE 4: ABOUT THE PROJECT
+# PAGE 4: REAL-WORLD TESTING
 # ==========================================
-elif selected_page == "ℹ️ About the Project":
+elif selected_page == "Real-World Testing":
+    st.markdown("## 🧪 Real-World Multi-Image Testing")
+    st.markdown(
+        "Upload multiple external waste photographs to test simultaneous model generalization. "
+        "Both the Custom CNN and MobileNetV2 run in parallel on each image, comparing confidence and detecting consensus."
+    )
+
+    # Prominent Disclaimer / Experimental Notice
+    st.markdown(
+        """
+        <div class="alert-card" style="border-left-color: #0288d1; background: #e1f5fe; color: #01579b;">
+            <b>ℹ️ Experimental Context: Controlled vs. Real-World In-the-Wild Testing</b><br>
+            • <b>Controlled Test Set:</b> The official TrashNet evaluation (380 images, 80.26% accuracy) was performed on standardized photographs featuring centered objects on plain white backgrounds.<br>
+            • <b>Uncontrolled External Testing:</b> Real-world photos introduce complex backgrounds, variable lighting, reflections, and occlusion.<br>
+            • <b>Integrity Guarantee:</b> Uploaded external images are <u>never</u> added to the training set or used for model fine-tuning.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    tab_multi_upload, tab_sample_batch = st.tabs(["📤 Upload External Image Batch", "⚡ Load Curated Benchmark Batch"])
+
+    images_to_process = []
+
+    with tab_multi_upload:
+        uploaded_files = st.file_uploader(
+            "Select one or multiple images to test (JPG, JPEG, PNG):",
+            type=["jpg", "jpeg", "png"],
+            accept_multiple_files=True,
+            help="You can drag and drop multiple waste images here at once.",
+        )
+        if uploaded_files:
+            for f in uploaded_files:
+                images_to_process.append({"source": f, "name": f.name})
+
+    with tab_sample_batch:
+        st.markdown("Test the entire 6-class curated benchmark suite simultaneously:")
+        sample_dir = config.DATA_DIR / "sample_test_images"
+        if sample_dir.exists():
+            sample_files = sorted(list(sample_dir.glob("*.jpg")))
+            st.write(f"Found **{len(sample_files)}** curated reference samples across all 6 classes.")
+            if st.button("🚀 Run Benchmark on All 6 Reference Samples"):
+                images_to_process = [{"source": p, "name": p.name} for p in sample_files]
+
+    st.divider()
+
+    # Process and display images
+    if images_to_process:
+        st.markdown(f"### 📋 Evaluating Batch ({len(images_to_process)} Images)")
+
+        progress_bar = st.progress(0)
+        batch_results = []
+
+        for idx, item in enumerate(images_to_process):
+            try:
+                comp_result = predict_both_models(item["source"], confidence_threshold=0.45)
+                comp_result["filename"] = item["name"]
+                batch_results.append(comp_result)
+
+                # Append to session history if not already present
+                history_entry = {
+                    "timestamp": time.strftime("%H:%M:%S"),
+                    "filename": item["name"],
+                    "cnn_pred": comp_result["cnn"]["predicted_class"],
+                    "cnn_conf": f"{comp_result['cnn']['confidence']:.1%}",
+                    "mob_pred": comp_result["mobilenet"]["predicted_class"],
+                    "mob_conf": f"{comp_result['mobilenet']['confidence']:.1%}",
+                    "agreement": "Agree" if comp_result["agree"] else "Disagree",
+                }
+                st.session_state["real_world_history"].append(history_entry)
+
+            except Exception as e:
+                st.error(f"Error processing {item['name']}: {e}")
+
+            progress_bar.progress((idx + 1) / len(images_to_process))
+
+        progress_bar.empty()
+
+        # Display side-by-side results for each image
+        for res in batch_results:
+            st.markdown(
+                f"""
+                <div class="rw-card">
+                    <div style="font-weight: 700; font-size: 1.1rem; color: #1b5e20; margin-bottom: 0.8rem;">
+                        📄 File: {res['filename']}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            col_thumb, col_cnn_res, col_mob_res = st.columns([1, 1.2, 1.2])
+
+            with col_thumb:
+                st.image(res["original_image"], use_container_width=True, caption=res["filename"])
+
+            with col_cnn_res:
+                cnn_info = res["cnn"]
+                st.markdown("##### ⚙️ Custom CNN")
+                st.markdown(f"**Predicted:** `{cnn_info['predicted_class'].upper()}`")
+                st.markdown(f"**Confidence:** `{cnn_info['confidence']:.1%}`")
+                st.progress(min(1.0, cnn_info["confidence"]))
+
+                if cnn_info["is_uncertain"]:
+                    st.caption("⚠️ Low confidence warning triggered")
+
+            with col_mob_res:
+                mob_info = res["mobilenet"]
+                st.markdown("##### 🚀 MobileNetV2 (Transfer Learning)")
+                st.markdown(f"**Predicted:** `{mob_info['predicted_class'].upper()}`")
+                st.markdown(f"**Confidence:** `{mob_info['confidence']:.1%}`")
+                st.progress(min(1.0, mob_info["confidence"]))
+
+                if mob_info["is_uncertain"]:
+                    st.caption("⚠️ Low confidence warning triggered")
+
+            # Consensus Pill
+            if res["agree"]:
+                st.success(f"✅ **Model Consensus:** Both architectures agree on **{res['consensus_class'].upper()}**")
+            else:
+                st.warning(
+                    f"⚠️ **Model Disagreement:** MobileNetV2 predicts **{mob_info['predicted_class'].upper()}** ({mob_info['confidence']:.1%}) "
+                    f"while Custom CNN predicts **{cnn_info['predicted_class'].upper()}** ({cnn_info['confidence']:.1%})"
+                )
+
+            # Expandable full probability breakdown
+            with st.expander(f"📊 View 6-Class Probabilities for {res['filename']}"):
+                prob_data = []
+                for c in config.CLASSES:
+                    prob_data.append({
+                        "Category": c.capitalize(),
+                        "Custom CNN": f"{res['cnn']['probabilities'][c]:.2%}",
+                        "MobileNetV2": f"{res['mobilenet']['probabilities'][c]:.2%}",
+                    })
+                st.table(pd.DataFrame(prob_data))
+
+            st.divider()
+
+    # Session-Based History
+    if st.session_state["real_world_history"]:
+        st.markdown("### 📜 Session-Based Prediction History")
+
+        hist_df = pd.DataFrame(st.session_state["real_world_history"]).drop_duplicates(subset=["filename", "timestamp"])
+
+        total_tested = len(hist_df)
+        agree_count = len(hist_df[hist_df["agreement"] == "Agree"])
+        agree_pct = (agree_count / total_tested) * 100 if total_tested > 0 else 0.0
+
+        h1, h2, h3 = st.columns(3)
+        with h1:
+            st.metric("Total Images Evaluated", total_tested)
+        with h2:
+            st.metric("Model Consensus Agreement", f"{agree_pct:.1f}%")
+        with h3:
+            if st.button("🗑️ Clear Session History"):
+                st.session_state["real_world_history"] = []
+                st.rerun()
+
+        st.dataframe(hist_df, use_container_width=True, hide_index=True)
+
+
+# ==========================================
+# PAGE 5: GRAD-CAM EXPLAINABILITY
+# ==========================================
+elif selected_page == "Grad-CAM Explainability":
+    st.markdown("## 🔬 Grad-CAM (Class Activation Mapping) Explainability")
+    st.markdown(
+        "Gradient-weighted Class Activation Mapping (Grad-CAM) illuminates the spatial regions "
+        "inside an image that the deep convolutional network utilizes to formulate its prediction. "
+        "Heatmaps are generated via backpropagation of class-specific gradients into the final convolutional feature maps."
+    )
+
+    # Explanation callout
+    with st.expander("ℹ️ How does Grad-CAM work mathematically?"):
+        st.markdown(
+            r"""
+            1. **Forward Pass:** The image passes through convolutional blocks to compute feature maps $A^k$ at the final convolutional layer.
+            2. **Backward Gradients:** We compute the gradient of the class score $y^c$ with respect to feature activations:
+               $$\alpha_k^c = \frac{1}{Z} \sum_{i}\sum_{j} \frac{\partial y^c}{\partial A_{i,j}^k}$$
+            3. **Weighted Feature Map Combination:** We compute a weighted sum of the activations and apply ReLU:
+               $$L_{\text{Grad-CAM}}^c = \text{ReLU}\left(\sum_k \alpha_k^c A^k\right)$$
+            4. **Overlay:** The resulting 2D activation map is scaled and color-mapped over the original photograph.
+            """
+        )
+
+    # Setup controls
+    col_ctrl1, col_ctrl2, col_ctrl3 = st.columns(3)
+
+    with col_ctrl1:
+        cam_model_type = st.selectbox(
+            "Select Architecture to Explain:",
+            options=["cnn", "mobilenet"],
+            format_func=lambda x: "Custom CNN (conv4_1 layer)" if x == "cnn" else "MobileNetV2 (out_relu layer)",
+            index=0,
+        )
+
+    with col_ctrl2:
+        target_class_choice = st.selectbox(
+            "Target Class Hypothesis:",
+            options=["Top Prediction"] + [c.capitalize() for c in config.CLASSES],
+            index=0,
+            help="Choose 'Top Prediction' or interrogate what features argue for an alternate category.",
+        )
+
+    with col_ctrl3:
+        overlay_alpha = st.slider("Heatmap Opacity (Alpha)", min_value=0.1, max_value=0.9, value=0.45, step=0.05)
+
+    # Image selection
+    st.markdown("#### 1. Choose Image to Explain")
+    cam_tab_sample, cam_tab_upload = st.tabs(["🖼️ Curated Sample Images", "📤 Upload Custom Image"])
+
+    cam_image_source = None
+    cam_label = ""
+
+    with cam_tab_sample:
+        sample_dir = config.DATA_DIR / "sample_test_images"
+        sample_items = {}
+        if sample_dir.exists():
+            for p in sorted(sample_dir.glob("*.jpg")):
+                clean_name = p.stem.replace("sample_", "").capitalize()
+                sample_items[f"{clean_name} Sample ({p.name})"] = p
+
+        if sample_items:
+            chosen_key = st.selectbox("Select sample test image:", list(sample_items.keys()), index=4)  # Plastic sample default
+            if st.button("Load Image for Grad-CAM"):
+                cam_image_source = sample_items[chosen_key]
+                cam_label = chosen_key
+        else:
+            st.info("Sample directory not found.")
+
+    with cam_tab_upload:
+        user_file = st.file_uploader("Upload an image (JPG, PNG) for Grad-CAM inspection:", type=["jpg", "jpeg", "png"], key="cam_upload")
+        if user_file is not None:
+            cam_image_source = user_file
+            cam_label = f"Uploaded: {user_file.name}"
+
+    st.divider()
+
+    # Grad-CAM Execution
+    if cam_image_source is not None:
+        try:
+            orig_pil, img_batch = preprocess_image_for_inference(cam_image_source)
+
+            model = load_model_cached(cam_model_type)
+
+            class_idx_arg = None
+            if target_class_choice != "Top Prediction":
+                clean_cls = target_class_choice.lower()
+                if clean_cls in config.CLASSES:
+                    class_idx_arg = config.CLASSES.index(clean_cls)
+
+            with st.spinner("Computing convolutional gradients and generating Grad-CAM activation map..."):
+                heatmap, target_c_idx, top_c_idx, probs = compute_gradcam(
+                    model=model,
+                    img_batch=img_batch,
+                    class_index=class_idx_arg,
+                    model_type=cam_model_type,
+                )
+
+                heatmap_pil, overlay_pil = overlay_gradcam(
+                    original_pil_img=orig_pil,
+                    heatmap=heatmap,
+                    alpha=overlay_alpha,
+                    colormap=cv2.COLORMAP_JET,
+                )
+
+            st.markdown(f"### 🔍 Grad-CAM Visualizations for `{config.CLASSES[target_c_idx].upper()}`")
+
+            # 3 Columns: Original, Heatmap, Overlay
+            g_col1, g_col2, g_col3 = st.columns(3)
+
+            with g_col1:
+                st.markdown("##### 📷 Original Image")
+                st.image(orig_pil, use_container_width=True, caption=cam_label)
+
+            with g_col2:
+                st.markdown("##### 🌡️ 2D Class Activation Heatmap")
+                st.image(heatmap_pil, use_container_width=True, caption="Thermal Jet Intensity")
+
+            with g_col3:
+                st.markdown("##### 🎯 Superimposed Explainability Overlay")
+                st.image(overlay_pil, use_container_width=True, caption="Grad-CAM Overlay")
+
+            # Diagnostic Metrics
+            d1, d2, d3, d4 = st.columns(4)
+            with d1:
+                st.metric("Top Predicted Class", config.CLASSES[top_c_idx].upper())
+            with d2:
+                st.metric("Target Explained Class", config.CLASSES[target_c_idx].upper())
+            with d3:
+                st.metric("Target Class Probability", f"{probs[target_c_idx]:.2%}")
+            with d4:
+                conv_layer_name = "conv4_1 (Custom CNN)" if cam_model_type == "cnn" else "out_relu (MobileNetV2)"
+                st.metric("Conv Feature Layer", conv_layer_name)
+
+            st.markdown(
+                f"""
+                <div style="background: #ffffff; padding: 1.2rem; border-radius: 12px; border: 1px solid #e0e0e0; margin-top: 1rem;">
+                    <b>💡 Interpretability Analysis:</b><br>
+                    • Red and yellow regions highlight spatial coordinates that produced the highest positive gradients for the 
+                    <b>{config.CLASSES[target_c_idx].upper()}</b> class.<br>
+                    • Blue and purple regions exerted negligible or inhibitory influence on this classification decision.<br>
+                    • This confirms whether the neural network is identifying true material contours (e.g., bottle necks, can rims, corrugated edges) 
+                    rather than latching onto background artifacts or lighting reflections.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        except Exception as e:
+            st.error(f"Error computing Grad-CAM: {e}")
+    else:
+        st.info("👆 Please select or upload an image above and click 'Load Image for Grad-CAM'.")
+
+
+# ==========================================
+# PAGE 6: ABOUT PROJECT
+# ==========================================
+elif selected_page == "About Project":
     st.markdown("## ℹ️ Academic Project Documentation")
     st.markdown(
         "A technical breakdown of the algorithms, datasets, and design patterns utilized in this Smart Waste Classification project."
     )
 
-    t1, t2, t3, t4 = st.tabs(["🧠 Deep Learning Architectures", "🚀 Transfer Learning & MobileNetV2", "📊 Dataset Details", "🛠️ Engineering Workflow"])
+    t1, t2, t3, t4, t5 = st.tabs([
+        "🧠 Deep Learning Architectures",
+        "🚀 Transfer Learning & MobileNetV2",
+        "🔬 Explainability (Grad-CAM)",
+        "📊 Dataset Details",
+        "🛠️ Engineering Workflow",
+    ])
 
     with t1:
         st.markdown("### Convolutional Neural Networks (CNN)")
@@ -749,6 +1105,18 @@ elif selected_page == "ℹ️ About the Project":
         )
 
     with t3:
+        st.markdown("### Grad-CAM (Gradient-weighted Class Activation Mapping)")
+        st.markdown(
+            r"""
+            Deep neural networks are frequently criticized as "black-box" models. **Grad-CAM** offers visual interpretability:
+            
+            - **How it works:** It uses the gradients of any target concept (say, the score for *Plastic*) flowing into the final convolutional layer to produce a coarse 2D localization map highlighting important regions in the image.
+            - **Why the final convolutional layer?** Convolutional layers naturally retain spatial information that is lost in dense classification layers. The final conv layer possesses the optimal compromise between high-level semantic abstractions and detailed spatial coordinates.
+            - **Rectified Linear Unit (ReLU):** Applied to the linear combination of feature maps because we are exclusively interested in visual features that have a positive influence on the chosen class of interest.
+            """
+        )
+
+    with t4:
         st.markdown("### The TrashNet Dataset")
         st.markdown(
             """
@@ -773,7 +1141,7 @@ elif selected_page == "ℹ️ About the Project":
             """
         )
 
-    with t4:
+    with t5:
         st.markdown("### Project Architecture & Workflow")
         st.markdown(
             """

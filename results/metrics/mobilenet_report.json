@@ -7,6 +7,11 @@
     "macro_f1": 0.7678396034592678,
     "weighted_f1": 0.8014127970327714,
     "total_parameters": 2625734,
+    "trainable_parameters": 1972742,
+    "non_trainable_parameters": 652992,
+    "file_size_mb": 25.67,
+    "inference_latency_ms": 39.39,
+    "training_duration_sec": 549.5,
     "confusion_matrix": [
         [
             48,

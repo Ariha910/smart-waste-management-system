@@ -6,7 +6,11 @@
         "Macro Recall":0.5314520571,
         "Macro F1-Score":0.5248978516,
         "Weighted F1-Score":0.570251342,
-        "Total Parameters":"536,998"
+        "Training Duration (s)":295.4,
+        "Avg Latency (ms)":16.99,
+        "File Size (MB)":6.26,
+        "Total Parameters":"536,998",
+        "Trainable Parameters":"535,526"
     },
     {
         "Model":"MobileNetV2 (Transfer Learning)",
@@ -15,6 +19,10 @@
         "Macro Recall":0.7460316062,
         "Macro F1-Score":0.7678396035,
         "Weighted F1-Score":0.801412797,
-        "Total Parameters":"2,625,734"
+        "Training Duration (s)":549.5,
+        "Avg Latency (ms)":39.39,
+        "File Size (MB)":25.67,
+        "Total Parameters":"2,625,734",
+        "Trainable Parameters":"1,972,742"
     }
 ]
