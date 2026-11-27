@@ -1,8 +1,10 @@
-# Smart Waste Classification Project Requirements
-tensorflow>=2.16.0
-streamlit>=1.30.0
+# Smart Waste Classification — Deployment Requirements
+# Pinned for Streamlit Community Cloud compatibility
+
+tensorflow==2.16.2
+streamlit>=1.30.0,<2.0.0
 numpy>=1.24.0,<2.0.0
-pandas>=2.0.0
+pandas>=2.0.0,<3.0.0
 opencv-python-headless>=4.8.0
 pillow>=10.0.0
 matplotlib>=3.7.0
